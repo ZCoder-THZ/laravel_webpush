@@ -1,0 +1,281 @@
+Read More https://medium.com/@sagarmaheshwary31/push-notifications-with-laravel-and-webpush-446884265aaa
+
+
+
+
+#1  \Schema::defaultStringLength(191); in appserviceprovider /app/provider
+Above code will set the default length of a string column to 191. Since Laravel comes with utf8mb4 charset as default and it’s max length of a unique key is 191. If it exceeds the limit then Laravel will generate an error and won’t run migrations. If you want to specify a different charset then you can set it in database.php config file located in config directory. Now setup the database and add the database credentials to .env file and run migrate command which will create all the necessary tables used for authentication:
+
+2# add authentication if u want
+
+3#migrate the table
+
+4#Before subscribing a user, we will need to generate application server keys known as VAPID Keys. VAPID Keys are public and private keys used for recognizing a user and these keys ensure that it’s the same server triggering the push messages to users. 
+
+$ npm install -g web-push
+$ web-push generate-vapid-keys
+
+5 # Since we are using a Laravel package called Webpush, we can generate above keys with an artisan command. Webpush libraries are also available for other languages, 
+
+webpush installatin command
+
+composer require laravel-notification-channels/webpush
+
+#6 add hashpush ->HasPushSubscription trait in User Model  
+///////////////////////
+<?php
+
+use NotificationChannels\WebPush\HasPushSubscriptions; //import the trait
+
+class User extends Model
+{
+
+    use HasPushSubscriptions; // add the trait to your class
+
+    //your model code...
+
+}
+//////////////////////////////
+
+
+
+7#After adding the trait we will need to publish the migration that will create the push_subscriptions table:
+
+php artisan vendor:publish --provider="NotificationChannels\WebPush\WebPushServiceProvider" --tag="migrations"
+
+
+8#genereate vapid keys which will be in .env only avaliable for 1 device im not sure 
+php artisan webpush:vapid
+
+9# Let’s create a Service Worker file in public directory named sw.js and a javascript file named enable-push.js in public/js directory. Add the script right before the </body> ending tag in app.blade.php layout file located in resources/views/layouts :
+1 create sw.js in public folder and create enable-push.js in public/js/..
+
+@auth
+    <script src="{{ asset('js/enable-push.js') }}" defer></script>
+@endauth
+
+
+
+
+
+10#inside enable-push.js
+initSW();
+function initSW() {
+    if (!"serviceWorker" in navigator) {
+        //service worker isn't supported
+        return;
+    }
+
+    //don't use it here if you use service worker
+    //for other stuff.
+    if (!"PushManager" in window) {
+        //push isn't supported
+        return;
+    }
+
+    //register the service worker
+    navigator.serviceWorker.register('../sw.js')
+        .then(() => {
+            console.log('serviceWorker installed!')
+            initPush();
+        })
+        .catch((err) => {
+            console.log(err)
+        });
+}
+function initPush() {
+    if (!navigator.serviceWorker.ready) {
+        return;
+    }
+
+    new Promise(function (resolve, reject) {
+        const permissionResult = Notification.requestPermission(function (result) {
+            resolve(result);
+        });
+
+        if (permissionResult) {
+            permissionResult.then(resolve, reject);
+        }
+    })
+        .then((permissionResult) => {
+            if (permissionResult !== 'granted') {
+                throw new Error('We weren\'t granted permission.');
+            }
+            subscribeUser();
+        });
+}
+function subscribeUser() {
+    navigator.serviceWorker.ready
+        .then((registration) => {
+            const subscribeOptions = {
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(
+                    'Add Your key that add in .env'
+                )
+            };
+
+            return registration.pushManager.subscribe(subscribeOptions);
+        })
+        .then((pushSubscription) => {
+            console.log('Received PushSubscription: ', JSON.stringify(pushSubscription));
+            storePushSubscription(pushSubscription);
+        });
+}
+function urlBase64ToUint8Array(base64String) {
+    var padding = '='.repeat((4 - base64String.length % 4) % 4);
+    var base64 = (base64String + padding)
+        .replace(/\-/g, '+')
+        .replace(/_/g, '/');
+
+    var rawData = window.atob(base64);
+    var outputArray = new Uint8Array(rawData.length);
+
+    for (var i = 0; i < rawData.length; ++i) {
+        outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+}
+function storePushSubscription(pushSubscription) {
+    const token = document.querySelector('meta[name=csrf-token]').getAttribute('content');
+
+    fetch('/push', {
+        method: 'POST',
+        body: JSON.stringify(pushSubscription),
+        headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': token
+        }
+    })
+        .then((res) => {
+            return res.json();
+        })
+        .then((res) => {
+            console.log(res)
+        })
+        .catch((err) => {
+            console.log(err)
+        });
+}
+
+11#inside sw.js
+self.addEventListener('push', function(event) {
+    const data = event.data.json();
+    const title = data.title;
+    const options = {
+        body: data.body,
+        icon: data.icon,
+        badge: data.badge,
+        // Add more options as needed
+    };
+    event.waitUntil(
+        self.registration.showNotification(title, options)
+    );
+});
+
+// Add any other service worker code as needed
+
+12 #Storing PushSubscription to the database
+
+Let’s start with our routes (add it in your web.php not api.php because we need to access the authenticated user):
+
+
+//store a push subscriber.
+Route::post('/push','PushController@store');
+
+Let’s create our PushController :
+
+php artisan make:controller PushController
+
+add inside this PushController
+
+<<?php
+
+namespace App\Http\Controllers;
+use Illuminate\Http\Request;
+use App\Notifications\PushDemo;
+use App\Models\User;
+use Auth;
+use Notification;
+
+class PushController extends Controller
+{
+
+    public function __construct(){
+      $this->middleware('auth');
+    }
+
+    /**
+     * Store the PushSubscription.
+     * 
+     * @param \Illuminate\Http\Request $request
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function store(Request $request){
+        $this->validate($request,[
+            'endpoint'    => 'required',
+            'keys.auth'   => 'required',
+            'keys.p256dh' => 'required'
+        ]);
+        $endpoint = $request->endpoint;
+        $token = $request->keys['auth'];
+        $key = $request->keys['p256dh'];
+        $user = Auth::user();
+        $user->updatePushSubscription($endpoint, $key, $token);
+        
+        return response()->json(['success' => true],200);
+    }
+    public function push(){
+    Notification::send(User::all(),new PushDemo);
+    return redirect()->back();
+}
+    
+}
+
+add routes inside the web.php
+Route::post('/push',[PushController::class,'store']);
+Route::get('/push',[PushController::class,'get'])->('push');
+
+12#Now we need to create a Notification in Laravel to send Push Notifications :
+
+php artisan make:notification PushDemo
+
+Open the notification class which is located in app/Notifcations directory and add this code:
+
+PushDemo
+
+<?php
+
+namespace App\Notifications;
+use Illuminate\Bus\Queueable;
+use Illuminate\Notifications\Notification;
+use NotificationChannels\WebPush\WebPushMessage;
+use NotificationChannels\WebPush\WebPushChannel;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Notifications\Messages\MailMessage;
+
+class PushDemo extends Notification
+{
+
+    use Queueable;
+    
+    public function via($notifiable)
+    {
+        return [WebPushChannel::class];
+    }
+
+    public function toWebPush($notifiable, $notification)
+    {
+        return (new WebPushMessage)
+            ->title('I\'m Notification Title')
+            ->icon('/notification-icon.png')
+            ->body('Great, Push Notifications work!')
+            ->action('View App', 'notification_action');
+    }
+    
+}
+///////////////////////////////////
+add this button inisde the homepage ->(Could be another page depend on where u wannput) after loggedin 
+<a href="{{route('push')}}" class="btn btn-outline-primary btn-block">Make a Push Notification!</a>
+
+last command php artisan migrate
